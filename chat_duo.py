@@ -5,6 +5,7 @@ import socket
 import threading
 import time
 import tkinter as tk
+from collections import deque
 
 TCP_PORT = 43821
 UDP_PORT = 43822
@@ -46,8 +47,9 @@ class DuoChat:
         root.minsize(470, 480)
         root.configure(bg=BG)
         root.protocol("WM_DELETE_WINDOW", self.close)
-        root.bind_all("<Escape>", lambda e: self.close())
-        root.bind_all("<Control-q>", lambda e: self.close())
+        # J toggles the diagnostic terminal; typing J in the message box remains normal.
+        root.bind_all("<KeyPress-j>", self.on_console_key)
+        root.bind_all("<KeyPress-J>", self.on_console_key)
 
         self.events = queue.Queue()
         self.conn = None
@@ -58,10 +60,22 @@ class DuoChat:
         self.remote_id = None
         self.net_lock = threading.Lock()
         self.connecting_to = None
+        self.connect_attempted_at = {}
+        self.discovered_logged_at = {}
+        self.log_throttle = {}
+        self.diag_lock = threading.Lock()
+        self.diag_lines = deque(maxlen=160)
+        self.console_visible = False
         self.closing = False
         self.mode = "searching"
 
+        # Separate the UI and diagnostic console so the console survives screen changes.
+        self.ui = tk.Frame(root, bg=BG)
+        self.ui.pack(fill="both", expand=True)
+        self.build_console()
         self.draw_searching()
+        self.log("INFO", f"Dúo Chat iniciado; ID local {self.peer_id[:8]}")
+        self.log("INFO", f"Descubrimiento automático por Wi-Fi (UDP {UDP_PORT}, TCP {TCP_PORT})")
         threading.Thread(target=self.server_worker, daemon=True).start()
         threading.Thread(target=self.discovery_worker, daemon=True).start()
         root.after(100, self.poll)
@@ -82,33 +96,91 @@ class DuoChat:
         )
 
     def base(self, subtitle):
-        for w in self.root.winfo_children():
+        for w in self.ui.winfo_children():
             w.destroy()
-        head = tk.Frame(self.root, bg=BG)
-        head.pack(fill="x", padx=25, pady=(22, 12))
-        self.label(head, "DÚO", 23, ACCENT, True).pack(anchor="w")
-        self.label(head, subtitle, 10, MUTED).pack(anchor="w", pady=(3, 0))
-        self.card = tk.Frame(self.root, bg=PANEL)
-        self.card.pack(fill="both", expand=True, padx=25, pady=(4, 24))
+        head = tk.Frame(self.ui, bg=BG)
+        head.pack(fill="x", padx=22, pady=(18, 9))
+        self.label(head, "DÚO", 20, ACCENT, True).pack(anchor="w")
+        if subtitle:
+            self.label(head, subtitle, 9, MUTED).pack(anchor="w", pady=(2, 0))
+        self.card = tk.Frame(self.ui, bg=PANEL)
+        self.card.pack(fill="both", expand=True, padx=22, pady=(3, 18))
 
     def draw_searching(self):
         self.mode = "searching"
-        self.base("Chat privado · conexión automática")
-        self.label(self.card, "Buscando la otra PC…", 17, FG, True).pack(anchor="w", padx=20, pady=(28, 9))
-        self.label(
-            self.card,
-            "Abre Dúo Chat en la otra computadora conectada al mismo Wi-Fi. "
-            "Cuando ambas estén abiertas, se conectarán solas.",
-            11, MUTED, wraplength=430, justify="left"
-        ).pack(anchor="w", padx=20, pady=(0, 20))
-        self.label(self.card, "No necesitas crear una sala ni escribir códigos.", 10, ACCENT).pack(anchor="w", padx=20, pady=(0, 10))
-        self.label(
-            self.card,
-            "Mantén esta ventana abierta. Si Windows muestra una alerta de firewall, "
-            "permite la conexión en redes privadas. La red debe permitir que los equipos se comuniquen entre sí.",
-            9, MUTED, wraplength=430, justify="left"
-        ).pack(anchor="w", padx=20, pady=(10, 18))
-        self.button(self.card, "Cerrar", self.close).pack(anchor="w", padx=20, pady=(8, 20))
+        self.base("")
+        self.label(self.card, "Buscando otra PC…", 17, FG, True).place(relx=0.5, rely=0.5, anchor="center")
+
+    def build_console(self):
+        self.console_frame = tk.Frame(
+            self.root, bg="#05070a", highlightbackground=ACCENT, highlightthickness=1
+        )
+        title = tk.Frame(self.console_frame, bg="#111720")
+        title.pack(fill="x")
+        tk.Label(
+            title, text="DIAGNÓSTICO · J para ocultar", bg="#111720",
+            fg=ACCENT, font=("Consolas", 9, "bold"), anchor="w"
+        ).pack(fill="x", padx=8, pady=5)
+        body = tk.Frame(self.console_frame, bg="#05070a")
+        body.pack(fill="both", expand=True)
+        self.console_text = tk.Text(
+            body, bg="#05070a", fg="#c7d7e5", insertbackground=FG,
+            font=("Consolas", 8), relief="flat", wrap="word",
+            state="disabled", padx=7, pady=5
+        )
+        scrollbar = tk.Scrollbar(body, command=self.console_text.yview)
+        self.console_text.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        self.console_text.pack(side="left", fill="both", expand=True)
+        self.console_frame.place_forget()
+
+    def on_console_key(self, event):
+        # Do not steal the letter J while typing a message.
+        try:
+            if self.root.focus_get() is getattr(self, "entry", None):
+                return None
+        except tk.TclError:
+            pass
+        self.toggle_console()
+        return "break"
+
+    def toggle_console(self):
+        self.console_visible = not self.console_visible
+        if self.console_visible:
+            self.console_frame.place(
+                relx=1.0, rely=1.0, x=-10, y=-10,
+                width=365, height=205, anchor="se"
+            )
+            self.console_frame.lift()
+            self.render_console()
+        else:
+            self.console_frame.place_forget()
+
+    def log(self, level, message, throttle_key=None, interval=0.0):
+        now = time.monotonic()
+        with self.diag_lock:
+            if throttle_key:
+                last = self.log_throttle.get(throttle_key, 0.0)
+                if now - last < interval:
+                    return
+                self.log_throttle[throttle_key] = now
+            stamp = time.strftime("%H:%M:%S")
+            self.diag_lines.append(f"[{stamp}] [{level}] {message}")
+        self.events.put(("diagnostic", None))
+
+    def render_console(self):
+        if not self.console_visible:
+            return
+        with self.diag_lock:
+            lines = list(self.diag_lines)
+        try:
+            self.console_text.configure(state="normal")
+            self.console_text.delete("1.0", "end")
+            self.console_text.insert("end", "\\n".join(lines) + ("\\n" if lines else ""))
+            self.console_text.configure(state="disabled")
+            self.console_text.see("end")
+        except tk.TclError:
+            pass
 
     def server_worker(self):
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -118,7 +190,7 @@ class DuoChat:
             srv.listen(5)
             srv.settimeout(0.5)
             self.server = srv
-            self.events.put(("status", "listening"))
+            self.log("OK", f"Escuchando conexiones TCP en el puerto {TCP_PORT}")
             while not self.closing:
                 try:
                     conn, _ = srv.accept()
@@ -126,10 +198,15 @@ class DuoChat:
                     continue
                 except OSError:
                     break
+                try:
+                    addr = conn.getpeername()[0]
+                except OSError:
+                    addr = "IP desconocida"
+                self.log("INFO", f"Conexión entrante desde {addr}")
                 threading.Thread(target=self.handle_incoming, args=(conn,), daemon=True).start()
         except OSError as e:
             if not self.closing:
-                self.events.put(("network_error", "No se pudo abrir el puerto de chat. Cierra otra instancia de Dúo Chat y vuelve a abrirlo. " + str(e)))
+                self.log("ERROR", f"No se pudo abrir TCP {TCP_PORT}: {e}. Revisa el puerto y el firewall.")
         finally:
             try:
                 srv.close()
@@ -141,9 +218,15 @@ class DuoChat:
             conn.settimeout(5)
             hello = read_packet(conn)
             remote_id = str(hello.get("id", ""))
+            try:
+                peer_ip = conn.getpeername()[0]
+            except OSError:
+                peer_ip = "IP desconocida"
             if hello.get("type") != "hello" or len(remote_id) != 24 or remote_id >= self.peer_id:
+                self.log("WARN", f"Conexión entrante descartada desde {peer_ip}: identificador o emparejamiento no válido")
                 conn.close()
                 return
+            self.log("INFO", f"PC detectada y negociación iniciada: {peer_ip}")
             with self.net_lock:
                 if self.closing or self.conn is not None:
                     conn.close()
@@ -152,9 +235,12 @@ class DuoChat:
                 self.remote_id = remote_id
             send_packet(conn, {"type": "ready"})
             conn.settimeout(None)
+            self.log("OK", f"Chat conectado con {peer_ip}")
             self.events.put(("connected", conn))
             threading.Thread(target=self.reader, args=(conn,), daemon=True).start()
-        except Exception:
+        except Exception as e:
+            if not self.closing:
+                self.log("WARN", f"Falló la negociación entrante: {e}", throttle_key="incoming-handshake", interval=2.0)
             try:
                 conn.close()
             except OSError:
@@ -174,6 +260,7 @@ class DuoChat:
             sender.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             self.discovery_receiver = receiver
             self.discovery_sender = sender
+            self.log("OK", f"Escuchando descubrimiento automático por UDP {UDP_PORT}")
             next_beacon = 0.0
             while not self.closing:
                 with self.net_lock:
@@ -187,8 +274,8 @@ class DuoChat:
                     }).encode("utf-8")
                     try:
                         sender.sendto(beacon, ("255.255.255.255", UDP_PORT))
-                    except OSError:
-                        pass
+                    except OSError as e:
+                        self.log("ERROR", f"No se pudo anunciar la PC por Wi-Fi: {e}", throttle_key="broadcast-send", interval=5.0)
                     next_beacon = now + 0.8
                 try:
                     data, addr = receiver.recvfrom(2048)
@@ -202,13 +289,21 @@ class DuoChat:
                     port = int(packet.get("port", TCP_PORT))
                     if packet.get("type") != "duo_discover" or len(remote_id) != 24 or remote_id == self.peer_id:
                         continue
+                    last_logged = self.discovered_logged_at.get(remote_id, 0.0)
+                    if now - last_logged >= 8.0:
+                        self.log("INFO", f"PC detectada en la red: {addr[0]}")
+                        self.discovered_logged_at[remote_id] = now
                     # Use deterministic peer-ID ordering: only the lower ID starts
                     # the TCP connection, preventing both PCs from connecting at once.
                     if self.peer_id < remote_id and 1 <= port <= 65535:
                         with self.net_lock:
                             if self.closing or self.conn is not None or self.connecting_to == remote_id:
                                 continue
+                            if now - self.connect_attempted_at.get(remote_id, 0.0) < 3.0:
+                                continue
+                            self.connect_attempted_at[remote_id] = now
                             self.connecting_to = remote_id
+                        self.log("INFO", f"Intentando conectar con {addr[0]}:{port}")
                         threading.Thread(
                             target=self.connect_worker,
                             args=(addr[0], port, remote_id),
@@ -218,7 +313,7 @@ class DuoChat:
                     continue
         except OSError as e:
             if not self.closing:
-                self.events.put(("network_error", "No se pudo activar el descubrimiento automático. Comprueba la red y el firewall. " + str(e)))
+                self.log("ERROR", f"No se pudo iniciar el descubrimiento UDP {UDP_PORT}: {e}. Comprueba firewall, Wi-Fi y otras instancias.", throttle_key="discovery-init", interval=10.0)
         finally:
             for s in (receiver, sender):
                 try:
@@ -244,7 +339,9 @@ class DuoChat:
             conn.settimeout(None)
             self.events.put(("connected", conn))
             threading.Thread(target=self.reader, args=(conn,), daemon=True).start()
-        except Exception:
+        except Exception as e:
+            if not self.closing:
+                self.log("WARN", f"No se pudo conectar con {host}:{port}: {e}", throttle_key=f"connect-{remote_id}", interval=3.0)
             try:
                 conn.close()
             except OSError:
@@ -269,7 +366,6 @@ class DuoChat:
         self.entry.pack(side="left", fill="x", expand=True, ipady=10, padx=(0, 8))
         self.entry.bind("<Return>", lambda e: self.send())
         self.button(row, "Enviar", self.send, True).pack(side="right")
-        self.write("Sistema", "Conexión establecida. El historial no se guarda.")
         self.entry.focus_set()
 
     def write(self, who, msg):
@@ -317,11 +413,9 @@ class DuoChat:
                     self.finish_from_peer()
                     return
                 elif kind == "network_error":
-                    if self.mode == "searching":
-                        self.label(
-                            self.card, value, 9, "#f08c8c",
-                            wraplength=430, justify="left"
-                        ).pack(anchor="w", padx=20, pady=(0, 8))
+                    self.log("ERROR", value)
+                elif kind == "diagnostic":
+                    self.render_console()
                 elif kind == "status":
                     pass
         except queue.Empty:
@@ -333,6 +427,7 @@ class DuoChat:
                 pass
 
     def finish_from_peer(self):
+        self.log("INFO", "La otra PC cerró la aplicación; cerrando esta ventana")
         self.closing = True
         self.cleanup_sockets(notify=False)
         try:
