@@ -62,6 +62,7 @@ class DuoChat:
         self.connecting_to = None
         self.connect_attempted_at = {}
         self.discovered_logged_at = {}
+        self.discovered_last_seen = {}
         self.log_throttle = {}
         self.diag_lock = threading.Lock()
         self.diag_lines = deque(maxlen=160)
@@ -262,10 +263,21 @@ class DuoChat:
             self.discovery_sender = sender
             self.log("OK", f"Escuchando descubrimiento automático por UDP {UDP_PORT}")
             next_beacon = 0.0
+            next_search_notice = time.monotonic() + 10.0
             while not self.closing:
                 with self.net_lock:
                     connected = self.conn is not None
                 now = time.monotonic()
+                if not connected and now >= next_search_notice:
+                    recently_seen = any(now - t < 3.0 for t in self.discovered_last_seen.values())
+                    if not recently_seen:
+                        self.log(
+                            "WARN",
+                            "Todavía no detecto otra PC. Comprueba que ambas estén en la misma Wi-Fi, "
+                            "que Windows permita Dúo Chat en redes privadas y que el router no aisle los dispositivos.",
+                            throttle_key="no-peer-found", interval=9.0
+                        )
+                    next_search_notice = now + 10.0
                 if not connected and now >= next_beacon:
                     beacon = json.dumps({
                         "type": "duo_discover",
@@ -289,6 +301,7 @@ class DuoChat:
                     port = int(packet.get("port", TCP_PORT))
                     if packet.get("type") != "duo_discover" or len(remote_id) != 24 or remote_id == self.peer_id:
                         continue
+                    self.discovered_last_seen[remote_id] = now
                     last_logged = self.discovered_logged_at.get(remote_id, 0.0)
                     if now - last_logged >= 8.0:
                         self.log("INFO", f"PC detectada en la red: {addr[0]}")
@@ -337,6 +350,7 @@ class DuoChat:
                 self.conn = conn
                 self.remote_id = remote_id
             conn.settimeout(None)
+            self.log("OK", f"Chat conectado con {host}")
             self.events.put(("connected", conn))
             threading.Thread(target=self.reader, args=(conn,), daemon=True).start()
         except Exception as e:
