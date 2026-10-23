@@ -1,0 +1,30 @@
+name: Build portable Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python on build runner only
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PyInstaller on build runner only
+        run: python -m pip install --upgrade pyinstaller
+      - name: Build single-file Windows executable
+        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name DuoChat chat_duo.py
+      - name: Upload portable EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: DuoChat-Windows
+          path: dist/DuoChat.exe
+          if-no-files-found: error
