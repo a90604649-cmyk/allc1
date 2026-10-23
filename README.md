@@ -1,25 +1,26 @@
 # Dúo Chat para Windows
 
-Aplicación de chat visible para dos computadoras Windows, sin cuentas, nombres ni teléfonos. GitHub Actions la empaqueta como un único `DuoChat.exe`; ninguna PC donde se ejecuta necesita instalar Python.
+Aplicación visible para chatear entre dos computadoras Windows, sin cuentas, nombres ni teléfonos. GitHub Actions crea un único `DuoChat.exe`; las computadoras donde se ejecuta no necesitan instalar Python.
 
-## Descargar el ejecutable
+## Descargar
 
-1. Abre la pestaña **Actions** de este repositorio.
+1. Entra en **Actions**.
 2. Abre la ejecución más reciente de **Build portable Windows EXE**.
-3. Espera a que termine correctamente y descarga **DuoChat-Windows** en Artifacts.
+3. Cuando termine con éxito, descarga **DuoChat-Windows** en Artifacts.
 4. Descomprime el ZIP y copia `DuoChat.exe` a la otra PC.
 
-## Uso automático
+## Uso
 
-1. Conecta ambas computadoras a la misma red Wi-Fi/LAN.
-2. Abre `DuoChat.exe` en la primera PC.
-3. Abre `DuoChat.exe` en la segunda PC.
-4. La aplicación descubre la otra instancia y conecta el chat automáticamente; no hay botones para crear/unirse ni códigos que introducir.
+1. Conecta ambas PC a la misma red Wi-Fi/LAN.
+2. Abre `DuoChat.exe` en las dos computadoras.
+3. Se buscan y conectan automáticamente, sin IP ni código.
+4. Al cerrar una ventana con la **X de Windows**, se avisa a la otra PC para que también se cierre.
+5. Pulsa **J** para mostrar u ocultar la consola de diagnóstico en una esquina. Ahí se registran los intentos de conexión, equipos detectados y errores de red.
 
-Al cerrar con la X, Esc o Ctrl+Q, la aplicación notifica a la otra PC para que también se cierre. Si Windows muestra una alerta de firewall al primer uso, permite la comunicación en redes privadas. Redes de invitados, aislamiento de clientes Wi-Fi o reglas del firewall pueden impedir el descubrimiento.
+Si aparece una alerta del Firewall de Windows, permite Dúo Chat en redes privadas. Las redes de invitados, el aislamiento de clientes Wi-Fi o las reglas del firewall pueden impedir que las PC se vean.
 
 ## Privacidad y límites
 
-No pide cuenta, nombre, correo ni teléfono. El historial no se guarda en disco y la ventana es visible (no se ejecuta oculta). Este prototipo solo funciona en una misma red local y **no cifra los mensajes de extremo a extremo**; no lo uses para información sensible. Está diseñado para dos PCs con Dúo Chat abierto; si hay más de dos copias en la misma red, no se garantiza qué dos se emparejarán.
+No pide cuenta, nombre, correo ni teléfono. El historial de mensajes no se guarda en disco y la ventana se mantiene visible (no se ejecuta oculta). Esta versión funciona solo en una misma red local y **no cifra los mensajes de extremo a extremo**; no la uses para información sensible. Está pensada para dos instancias; si hay más de dos copias ejecutándose en la misma red, el emparejamiento no está garantizado.
 
-El EXE se construye con GitHub Actions usando la receta de `.github/workflows/build-windows.yml`.
+La compilación portátil está definida en `.github/workflows/build-windows.yml`.
